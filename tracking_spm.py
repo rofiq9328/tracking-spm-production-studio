@@ -569,11 +569,10 @@ def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing to su
 
     df_rec = pd.DataFrame(records)
     # Satu baris Request tersedia untuk setiap kombinasi tanggal + line pada sumber.
-    # Sum Count untuk berjaga-jaga jika file sumber memuat baris Request ganda;
-    # Lead Time dirata-ratakan, bukan dijumlahkan karena merupakan durasi.
+    # Count dan Lead Time mengikuti agregasi nilai pada baris Request sumber.
     grouped = df_rec.groupby(["TANGGAL", "LINE"], as_index=False).agg(
         REQ_SPM_NUM=("REQ_SPM_NUM", "sum"),
-        LEAD_TIME_NUM=("LEAD_TIME_NUM", "mean"),
+        LEAD_TIME_NUM=("LEAD_TIME_NUM", "sum"),
     )
     grouped["REQ SPM"] = grouped["REQ_SPM_NUM"].apply(
         lambda value: int(value) if float(value).is_integer() else round(float(value), 2)
@@ -906,7 +905,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         if col_idx == 1:
             cell.value = "TOTAL"
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        elif col_name in {"BUNDLING OUT", "REQ SPM", "HASIL PRODUKSI"}:
+        elif col_name in {"BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
             col_letter = get_column_letter(col_idx)
             cell.value = f"=SUM({col_letter}2:{col_letter}{last_data_row})"
             cell.number_format = "#,##0.##"
@@ -1120,7 +1119,7 @@ class FastTrackingApp(tk.Tk):
         col_widths = {
             "TANGGAL": 112, "LINE": 68, "KT ORDER": 126, "STYLE": 145,
             "COLOR": 170, "DESCRIPTION": 220, "ISI BUNDLE": 104,
-            "STATUS": 78, "BUNDLING OUT": 128, "REQ SPM": 105, "HASIL PRODUKSI": 145,
+            "STATUS": 78, "BUNDLING OUT": 128, "REQ SPM": 105, "LEAD TIME": 110, "HASIL PRODUKSI": 145,
         }
         left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
         numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
