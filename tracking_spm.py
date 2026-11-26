@@ -759,11 +759,13 @@ def calculate_line_wip(df_spm_raw: pd.DataFrame, df_prod_raw: pd.DataFrame) -> d
             prod["HASIL PRODUKSI"], errors="coerce"
         ).fillna(0)
 
-        # Jangan mengurangi produksi dari style yang tidak tercatat pada SPM
-        # di line yang sama. Color dialokasikan terpisah dengan FIFO di bawah.
-        valid_styles = spm[["TANGGAL", "LINE", "STYLE_WIP_KEY"]].drop_duplicates()
+        # Cocokkan produksi ke LINE + STYLE yang muncul pada dataset SPM
+        # terfilter sepanjang rentang tanggal. Jangan mensyaratkan ada baris
+        # SPM pada tanggal produksi yang sama: produksi pada hari tanpa
+        # bundling tetap harus mengurangi saldo WIP berjalan.
+        valid_styles = spm[["LINE", "STYLE_WIP_KEY"]].drop_duplicates()
         prod = prod.merge(
-            valid_styles, on=["TANGGAL", "LINE", "STYLE_WIP_KEY"],
+            valid_styles, on=["LINE", "STYLE_WIP_KEY"],
             how="inner", sort=False,
         )
         daily_out = (
