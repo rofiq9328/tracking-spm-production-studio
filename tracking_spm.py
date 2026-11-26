@@ -63,9 +63,13 @@ def norm_header(val) -> str:
 
 def norm_section_name(val) -> str:
     s = str(val or "").strip().lower()
-    s = re.sub(r"\s+", " ", s)
-    # Tangani typo umum "sweing" pada data sumber Andon agar tetap cocok dengan "sewing"
-    s = s.replace("sweing", "sewing")
+    # Samakan typo "sweing" menjadi "sewing".
+    s = re.sub(r"\bsweing\b", "sewing", s)
+    # Nama section pada Andon kadang menyisipkan kata "Line".
+    # Hilangkan kata tersebut agar "Sweing Line to SuperMarket" cocok
+    # dengan target "sewing to supermarket".
+    s = re.sub(r"\bline\b", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
@@ -754,10 +758,12 @@ def filter_and_merge_data(
         df_req = df_req_spm.copy()
         df_req["TANGGAL"] = df_req["TANGGAL"].apply(_normalize_date_value)
         df_req["LINE"] = df_req["LINE"].apply(_normalize_line_value)
+        # Data Andon kadang menyimpan Count sebagai teks; konversi sebelum merge.
+        df_req["REQ SPM"] = df_req["REQ SPM"].apply(parse_count_value)
         if target_lines is not None:
             df_req = df_req[df_req["LINE"].isin(target_lines)]
         df_merged = df_merged.merge(df_req, how="left", on=["TANGGAL", "LINE"], sort=False)
-        df_merged["REQ SPM"] = df_merged["REQ SPM"].fillna(0)
+        df_merged["REQ SPM"] = pd.to_numeric(df_merged["REQ SPM"], errors="coerce").fillna(0)
     else:
         df_merged["REQ SPM"] = 0
 
@@ -835,6 +841,10 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 cell.number_format = "dd-mmm-yyyy"
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             elif col_name in numeric_cols:
+                # Paksa isi sel menjadi angka Excel, termasuk bila DataFrame berisi string angka.
+                if cell_value is not None:
+                    numeric_value = parse_count_value(cell_value)
+                    cell.value = int(numeric_value) if float(numeric_value).is_integer() else float(numeric_value)
                 cell.number_format = "#,##0" if col_name == "LINE" else "#,##0.##"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             elif col_name in left_cols:
