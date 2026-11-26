@@ -817,12 +817,12 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
     ws = wb.active
     ws.title = "TRACKING SPM & PRODUKSI"
     ws.sheet_view.showGridLines = False
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "A3"
     ws.sheet_properties.pageSetUpPr.fitToPage = True
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.page_setup.orientation = "landscape"
-    ws.print_title_rows = "1:1"
+    ws.print_title_rows = "1:2"
 
     header_fill = PatternFill(start_color="17365D", end_color="17365D", fill_type="solid")
     header_font = Font(name="Aptos", size=10, bold=True, color="FFFFFF")
@@ -833,8 +833,11 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
     thin = Side(border_style="hair", color="D9E2EF")
     border = Border(bottom=thin)
 
+    req_col_idx = OUTPUT_COLUMNS.index("REQ SPM") + 1
+    lead_col_idx = OUTPUT_COLUMNS.index("LEAD TIME") + 1
     for col_idx, col_name in enumerate(OUTPUT_COLUMNS, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=col_name)
+        display_name = "COUNT" if col_name == "REQ SPM" else col_name
+        cell = ws.cell(row=2, column=col_idx, value=display_name)
         if col_name == "HASIL PRODUKSI":
             cell.comment = Comment(
                 "Hasil produksi pada sumber tersedia di level TANGGAL + LINE + STYLE, bukan per COLOR.",
@@ -842,7 +845,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
             )
         elif col_name == "REQ SPM":
             cell.comment = Comment(
-                "REQ SPM diambil dari TROUBLE_NM=Request pada Andon, level TANGGAL + LINE.",
+                "REQ SPM (COUNT) diambil dari TROUBLE_NM=Request pada Andon, level TANGGAL + LINE.",
                 "Tracking SPM & Produksi",
             )
         elif col_name == "LEAD TIME":
@@ -854,14 +857,30 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
-    ws.row_dimensions[1].height = 27
+
+    # Header bertingkat: REQ SPM menjadi judul induk untuk COUNT dan LEAD TIME.
+    ws.merge_cells(
+        start_row=1, start_column=req_col_idx,
+        end_row=1, end_column=lead_col_idx,
+    )
+    parent_header = ws.cell(row=1, column=req_col_idx, value="REQ SPM")
+    parent_header.fill = header_fill
+    parent_header.font = header_font
+    parent_header.alignment = Alignment(horizontal="center", vertical="center")
+    parent_header.border = border
+    for col_idx in range(req_col_idx, lead_col_idx + 1):
+        ws.cell(row=1, column=col_idx).fill = header_fill
+        ws.cell(row=1, column=col_idx).border = border
+
+    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[2].height = 27
 
     # LINE ditampilkan sebagai bilangan bulat; kuantitas tetap dapat memiliki desimal asli.
     numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
     left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
     widths = {name: max(12, len(name) + 3) for name in OUTPUT_COLUMNS}
 
-    for row_idx, values in enumerate(df.loc[:, OUTPUT_COLUMNS].itertuples(index=False, name=None), start=2):
+    for row_idx, values in enumerate(df.loc[:, OUTPUT_COLUMNS].itertuples(index=False, name=None), start=3):
         zebra = row_idx % 2 == 0
         for col_idx, (col_name, value) in enumerate(zip(OUTPUT_COLUMNS, values), start=1):
             if value is None or (not isinstance(value, (list, tuple, dict)) and pd.isna(value)):
@@ -900,7 +919,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 if text_len + 2 > widths[col_name]:
                     widths[col_name] = min(text_len + 2, 42)
 
-    last_data_row = len(df) + 1
+    last_data_row = len(df) + 2
     total_row = last_data_row + 1
     for col_idx, col_name in enumerate(OUTPUT_COLUMNS, start=1):
         cell = ws.cell(row=total_row, column=col_idx)
@@ -912,7 +931,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
             cell.alignment = Alignment(horizontal="center", vertical="center")
         elif col_name in {"BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
             col_letter = get_column_letter(col_idx)
-            cell.value = f"=SUM({col_letter}2:{col_letter}{last_data_row})"
+            cell.value = f"=SUM({col_letter}3:{col_letter}{last_data_row})"
             total_value = pd.to_numeric(df[col_name], errors="coerce").sum()
             cell.number_format = "#,##0" if float(total_value).is_integer() else "#,##0.##"
             cell.alignment = Alignment(horizontal="right", vertical="center")
@@ -928,7 +947,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         ws.column_dimensions[col_letter].width = min(max(widths[col_name], default_width), 42)
 
     if last_data_row >= 1:
-        ws.auto_filter.ref = f"A1:{get_column_letter(len(OUTPUT_COLUMNS))}{last_data_row}"
+        ws.auto_filter.ref = f"A2:{get_column_letter(len(OUTPUT_COLUMNS))}{last_data_row}"
 
     wb.save(out_path)
 
@@ -1118,10 +1137,6 @@ class FastTrackingApp(tk.Tk):
 
         table_body = ttk.Frame(card_tbl, style="Card.TFrame")
         table_body.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(table_body, show="headings", columns=OUTPUT_COLUMNS, selectmode="browse")
-        self.tree.tag_configure("odd", background="#F5F8FC")
-        self.tree.tag_configure("even", background="#FFFFFF")
-
         col_widths = {
             "TANGGAL": 112, "LINE": 68, "KT ORDER": 126, "STYLE": 145,
             "COLOR": 170, "DESCRIPTION": 220, "ISI BUNDLE": 104,
@@ -1129,18 +1144,67 @@ class FastTrackingApp(tk.Tk):
         }
         left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
         numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
+
+        # Custom two-level table header so REQ SPM can span COUNT + LEAD TIME.
+        header_height = 48
+        total_header_width = sum(col_widths.get(col, 110) for col in OUTPUT_COLUMNS)
+        self.header_canvas = tk.Canvas(
+            table_body, height=header_height, highlightthickness=0,
+            bd=0, bg="#FFFFFF",
+        )
+        self.header_canvas.grid(row=0, column=0, sticky="ew")
+        header_inner = ttk.Frame(table_body, style="Card.TFrame")
+        header_inner.grid_propagate(False)
+        self.header_canvas.create_window(
+            (0, 0), window=header_inner, anchor="nw",
+            width=total_header_width, height=header_height,
+        )
+        self.header_canvas.configure(scrollregion=(0, 0, total_header_width, header_height))
+
+        for col_idx, col_name in enumerate(OUTPUT_COLUMNS):
+            header_inner.columnconfigure(col_idx, minsize=col_widths.get(col_name, 110), weight=0)
+        header_inner.rowconfigure(0, minsize=24, weight=1)
+        header_inner.rowconfigure(1, minsize=24, weight=1)
+
+        def make_table_header(text):
+            return tk.Label(
+                header_inner, text=text, bg="#17365D", fg="#FFFFFF",
+                font=("Segoe UI", 9, "bold"), relief="solid", bd=1,
+                padx=4, pady=3, anchor="center",
+            )
+
+        col_idx = 0
+        while col_idx < len(OUTPUT_COLUMNS):
+            col_name = OUTPUT_COLUMNS[col_idx]
+            if col_name == "REQ SPM":
+                parent = make_table_header("REQ SPM")
+                parent.grid(row=0, column=col_idx, columnspan=2, sticky="nsew")
+                make_table_header("COUNT").grid(row=1, column=col_idx, sticky="nsew")
+                make_table_header("LEAD TIME").grid(row=1, column=col_idx + 1, sticky="nsew")
+                col_idx += 2
+                continue
+
+            label = make_table_header(col_name)
+            label.grid(row=0, column=col_idx, rowspan=2, sticky="nsew")
+            col_idx += 1
+
+        self.tree = ttk.Treeview(table_body, show="", columns=OUTPUT_COLUMNS, selectmode="browse")
+        self.tree.tag_configure("odd", background="#F5F8FC")
+        self.tree.tag_configure("even", background="#FFFFFF")
         for col in OUTPUT_COLUMNS:
-            self.tree.heading(col, text=col)
             anchor = "w" if col in left_cols else ("e" if col in numeric_cols else "center")
-            self.tree.column(col, width=col_widths.get(col, 110), minwidth=65, anchor=anchor, stretch=(col == "DESCRIPTION"))
+            self.tree.column(
+                col, width=col_widths.get(col, 110), minwidth=65,
+                anchor=anchor, stretch=False,
+            )
 
         vsb = ttk.Scrollbar(table_body, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(table_body, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        hsb.grid(row=1, column=0, sticky="ew")
-        table_body.rowconfigure(0, weight=1)
+        self.hsb = ttk.Scrollbar(table_body, orient="horizontal", command=self._scroll_table_x)
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=self._sync_table_x)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        vsb.grid(row=1, column=1, sticky="ns")
+        self.hsb.grid(row=2, column=0, sticky="ew")
+        table_body.rowconfigure(1, weight=1)
         table_body.columnconfigure(0, weight=1)
 
     def _make_kpi_card(self, parent, col: int, title: str, initial_val: str, padx):
@@ -1150,6 +1214,16 @@ class FastTrackingApp(tk.Tk):
         value_label = ttk.Label(box, text=initial_val, style="KpiValue.TLabel")
         value_label.pack(anchor="w", pady=(3, 0))
         return value_label
+
+    def _scroll_table_x(self, *args):
+        """Scroll table rows and the custom two-level header horizontally together."""
+        self.tree.xview(*args)
+        self.header_canvas.xview(*args)
+
+    def _sync_table_x(self, first, last):
+        """Keep the header aligned with the Treeview horizontal scroll position."""
+        self.hsb.set(first, last)
+        self.header_canvas.xview_moveto(float(first))
 
     def _pick_dir(self, var):
         initial = var.get().strip()
