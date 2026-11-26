@@ -832,8 +832,8 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 cell.number_format = "dd-mmm-yyyy"
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             elif col_name in numeric_cols:
-                # Semua kolom kuantitas dan LINE ditampilkan tanpa .0 di belakang angka.
-                cell.number_format = "#,##0"
+                # LINE selalu bilangan bulat; kolom kuantitas tetap mendukung pecahan asli.
+                cell.number_format = "#,##0" if col_name == "LINE" else "#,##0.##"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             elif col_name in left_cols:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
