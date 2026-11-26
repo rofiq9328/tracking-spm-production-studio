@@ -862,9 +862,9 @@ def filter_and_merge_data(
     if df_spm_raw is None or df_spm_raw.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
-    # WIP dihitung dari seluruh transaksi dalam rentang tanggal, bukan hanya
-    # baris yang lolos filter style/color/status pada tampilan.
-    wip_lookup = calculate_line_wip(df_spm_raw, df_prod_raw)
+    # Terapkan filter terlebih dahulu. WIP mengikuti baris SPM yang benar-benar
+    # tampil di aplikasi, sehingga status/style/color tersembunyi tidak ikut
+    # menambah atau mengurangi saldo inventory.
     df_spm = df_spm_raw
     if target_lines is not None:
         df_spm = df_spm[df_spm["LINE"].isin(target_lines)]
@@ -894,6 +894,11 @@ def filter_and_merge_data(
 
     if df_spm.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    # WIP dihitung dari dataset yang sudah lolos filter tampilan (tanggal,
+    # line, status, style, color). Produksi tetap dicocokkan dengan LINE+STYLE,
+    # lalu dialokasikan ke color yang tampil menggunakan FIFO.
+    wip_lookup = calculate_line_wip(df_spm, df_prod_raw)
 
     join_keys = ["TANGGAL", "LINE", "STYLE_KEY"]
     df_prod = df_prod_raw
