@@ -738,6 +738,19 @@ def calculate_line_wip(df_spm_raw: pd.DataFrame, df_prod_raw: pd.DataFrame) -> d
         prod["TANGGAL"] = prod["TANGGAL"].apply(_normalize_date_value)
         prod["LINE"] = prod["LINE"].apply(_normalize_line_value)
         prod["HASIL PRODUKSI"] = pd.to_numeric(prod["HASIL PRODUKSI"], errors="coerce").fillna(0)
+
+        # Gunakan hanya produksi yang STYLE-nya ada pada data SPM untuk
+        # tanggal + line tersebut. Ini menyamakan basis WIP dengan kolom
+        # HASIL PRODUKSI yang ditampilkan setelah pencocokan STYLE_KEY.
+        if "STYLE_KEY" in spm.columns and "STYLE_KEY" in prod.columns:
+            valid_style_keys = spm[["TANGGAL", "LINE", "STYLE_KEY"]].drop_duplicates()
+            prod = prod.merge(
+                valid_style_keys,
+                on=["TANGGAL", "LINE", "STYLE_KEY"],
+                how="inner",
+                sort=False,
+            )
+
         daily_out = prod.groupby(["TANGGAL", "LINE"], as_index=False, dropna=False)["HASIL PRODUKSI"].sum()
     else:
         daily_out = pd.DataFrame(columns=["TANGGAL", "LINE", "HASIL PRODUKSI"])
