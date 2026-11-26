@@ -247,7 +247,8 @@ def save_file_cache(folder_path: str, kind: str, fname: str, fpath: str, df: pd.
             json.dump(
                 {
                     "folder": folder_path,
-                    "file": fname,                    "size": stat.st_size,
+                    "file": fname,
+                    "size": stat.st_size,
                     "mtime_ns": stat.st_mtime_ns,
                     "rows": len(df),
                     "cached_at": datetime.now().isoformat(timespec="seconds"),
@@ -477,7 +478,7 @@ def _parse_packing_excel(fpath: str, tgl: date | None) -> pd.DataFrame:
     return grouped[["TANGGAL", "LINE", "STYLE_KEY", "HASIL PRODUKSI"]]
 
 
-def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing line to supermarket") -> pd.DataFrame:
+def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing to supermarket") -> pd.DataFrame:
     """Baca file Andon Monthly (.xls/.xlsx) dan ekstrak kolom Count per TANGGAL + LINE untuk section_nm terpilih."""
     empty_df = pd.DataFrame(columns=["TANGGAL", "LINE", "REQ SPM"])
     if not andon_path or not os.path.isfile(andon_path):
@@ -496,7 +497,8 @@ def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing line 
     for col_name in df_raw.columns:
         m = re.match(r"^DAY\s*(\d{1,2})$", str(col_name).strip(), re.IGNORECASE)
         if m:
-            day_num = int(m.group(1))            sub_h = str(df_raw.iloc[0][col_name] or "").strip().lower()
+            day_num = int(m.group(1))
+            sub_h = str(df_raw.iloc[0][col_name] or "").strip().lower()
             if sub_h in {"", "count"}:
                 day_cols[day_num] = col_name
 
@@ -745,7 +747,8 @@ def filter_and_merge_data(
         df_merged = df_spm.merge(df_prod, how="left", on=join_keys, sort=False)
         df_merged["HASIL PRODUKSI"] = df_merged["HASIL PRODUKSI"].fillna(0)
 
-    df_merged["TANGGAL"] = df_merged["TANGGAL"].apply(_normalize_date_value)    df_merged["LINE"] = df_merged["LINE"].apply(_normalize_line_value)
+    df_merged["TANGGAL"] = df_merged["TANGGAL"].apply(_normalize_date_value)
+    df_merged["LINE"] = df_merged["LINE"].apply(_normalize_line_value)
 
     if df_req_spm is not None and not df_req_spm.empty:
         df_req = df_req_spm.copy()
@@ -809,7 +812,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         cell.border = border
     ws.row_dimensions[1].height = 27
 
-    # Kolom LINE juga harus diformat sebagai angka bulat agar nilai seperti 34.0 tampil 34.
+    # LINE ditampilkan sebagai bilangan bulat; kuantitas tetap dapat memiliki desimal asli.
     numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "HASIL PRODUKSI"}
     left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
     widths = {name: max(12, len(name) + 3) for name in OUTPUT_COLUMNS}
@@ -832,7 +835,6 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 cell.number_format = "dd-mmm-yyyy"
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             elif col_name in numeric_cols:
-                # LINE selalu bilangan bulat; kolom kuantitas tetap mendukung pecahan asli.
                 cell.number_format = "#,##0" if col_name == "LINE" else "#,##0.##"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             elif col_name in left_cols:
@@ -996,7 +998,8 @@ class FastTrackingApp(tk.Tk):
         ttk.Entry(card_src, textvariable=self.var_andon).grid(row=2, column=1, sticky="ew", padx=4, pady=4)
         ttk.Button(card_src, text="Pilih File", style="Secondary.TButton", command=self._pick_andon_file).grid(row=2, column=2, padx=(6, 0), pady=4)
 
-        source_opts = ttk.Frame(card_src, style="Card.TFrame")        source_opts.grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=(6, 0))
+        source_opts = ttk.Frame(card_src, style="Card.TFrame")
+        source_opts.grid(row=3, column=1, columnspan=2, sticky="w", padx=4, pady=(6, 0))
         ttk.Checkbutton(source_opts, text="Gunakan cache lokal per-file", variable=self.var_use_cache).pack(side="left", padx=(0, 20))
         ttk.Label(source_opts, text="Worker paralel", style="CardLabel.TLabel").pack(side="left", padx=(0, 7))
         ttk.Combobox(source_opts, textvariable=self.var_workers, values=["2", "4", "6", "8"], width=4, state="readonly").pack(side="left", padx=(0, 18))
@@ -1196,8 +1199,8 @@ class FastTrackingApp(tk.Tk):
                 prod_dir, start_dt=start_dt, end_dt=end_dt, use_cache=use_cache,
                 workers=workers, progress_cb=self._set_status,
             )
-            self._set_status("Membaca data REQ SPM (Sewing Line to SuperMarket)...")
-            df_req_spm = load_req_spm_from_andon(andon_path, target_section="sewing line to supermarket")
+            self._set_status("Membaca data REQ SPM (sewing to supermarket)...")
+            df_req_spm = load_req_spm_from_andon(andon_path, target_section="sewing to supermarket")
 
             self._set_status("Memfilter dan menggabungkan data...")
             result_df = filter_and_merge_data(
@@ -1296,3 +1299,57 @@ class FastTrackingApp(tk.Tk):
         if end_at < preview_rows:
             self.lbl_preview.config(text=f"Menampilkan {end_at:,} dari {total_rows:,} baris...")
             self._tree_after_id = self.after(
+                1, lambda: self._insert_tree_batch(rows, token, preview_rows, total_rows, end_at)
+            )
+        else:
+            self._tree_after_id = None
+            suffix = f" — preview {preview_rows:,} baris; export tetap seluruh data" if total_rows > preview_rows else ""
+            self.lbl_preview.config(text=f"{preview_rows:,} dari {total_rows:,} baris{suffix}")
+
+    def export_excel(self):
+        if self.df_result.empty:
+            messagebox.showwarning("Data Kosong", "Belum ada data untuk di-export. Silakan klik 'Proses Data' terlebih dahulu.")
+            return
+        if self.is_running or self.is_exporting:
+            return
+
+        style_tag = re.sub(r"[^A-Za-z0-9_-]+", "_", self.var_style.get().strip()) or "ALL_STYLE"
+        line_tag = re.sub(r"[^A-Za-z0-9_-]+", "_", self.var_line.get().strip()) or "ALL_LINE"
+        color_tag = re.sub(r"[^A-Za-z0-9_-]+", "_", self.var_color.get().strip()) or "ALL_COLOR"
+        default_name = f"Tracking_SPM_Produksi_{style_tag}_{line_tag}_{color_tag}.xlsx"
+        out_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx", filetypes=[("Excel Workbook", "*.xlsx")], initialfile=default_name,
+        )
+        if not out_path:
+            return
+
+        self.is_exporting = True
+        self._set_busy(True)
+        self.lbl_status.config(text="Mengekspor file Excel di latar belakang...")
+        export_df = self.df_result
+        worker = threading.Thread(target=self._worker_export, args=(export_df, out_path), daemon=True, name="tracking-export-worker")
+        worker.start()
+
+    def _worker_export(self, df: pd.DataFrame, out_path: str):
+        try:
+            save_styled_excel(df, out_path)
+            self.ui_queue.put(("export_success", out_path))
+        except Exception as exc:
+            self.ui_queue.put(("export_error", exc))
+
+    def _on_export_success(self, out_path: str):
+        self.is_exporting = False
+        self._set_busy(False)
+        self.lbl_status.config(text="Export Excel selesai.")
+        messagebox.showinfo("Export Berhasil", f"File Excel berhasil disimpan ke:\n{out_path}")
+
+    def _on_export_error(self, exc: Exception):
+        self.is_exporting = False
+        self._set_busy(False)
+        self.lbl_status.config(text="Export Excel gagal.")
+        messagebox.showerror("Gagal Export", str(exc))
+
+
+if __name__ == "__main__":
+    app = FastTrackingApp()
+    app.mainloop()
