@@ -37,6 +37,7 @@ OUTPUT_COLUMNS = [
     "REQ SPM",
     "LEAD TIME",
     "HASIL PRODUKSI",
+    "WIP",
 ]
 
 SPM_HEADER_ALIASES = {
@@ -718,6 +719,40 @@ def load_packing_range_data(
     return pd.concat(dfs, ignore_index=True)
 
 
+def calculate_line_wip(df_spm_raw: pd.DataFrame, df_prod_raw: pd.DataFrame) -> dict:
+    """Hitung saldo WIP berjalan per line dari awal rentang data (saldo awal 0)."""
+    if df_spm_raw is None or df_spm_raw.empty:
+        return {}
+
+    spm = df_spm_raw.copy()
+    spm["TANGGAL"] = spm["TANGGAL"].apply(_normalize_date_value)
+    spm["LINE"] = spm["LINE"].apply(_normalize_line_value)
+    spm["BUNDLING IN"] = (
+        pd.to_numeric(spm["BUNDLING OUT"], errors="coerce").fillna(0)
+        * pd.to_numeric(spm["ISI BUNDLE"], errors="coerce").fillna(0)
+    )
+    daily_in = spm.groupby(["TANGGAL", "LINE"], as_index=False, dropna=False)["BUNDLING IN"].sum()
+
+    if df_prod_raw is not None and not df_prod_raw.empty:
+        prod = df_prod_raw.copy()
+        prod["TANGGAL"] = prod["TANGGAL"].apply(_normalize_date_value)
+        prod["LINE"] = prod["LINE"].apply(_normalize_line_value)
+        prod["HASIL PRODUKSI"] = pd.to_numeric(prod["HASIL PRODUKSI"], errors="coerce").fillna(0)
+        daily_out = prod.groupby(["TANGGAL", "LINE"], as_index=False, dropna=False)["HASIL PRODUKSI"].sum()
+    else:
+        daily_out = pd.DataFrame(columns=["TANGGAL", "LINE", "HASIL PRODUKSI"])
+
+    daily = daily_in.merge(daily_out, on=["TANGGAL", "LINE"], how="outer")
+    daily[["BUNDLING IN", "HASIL PRODUKSI"]] = daily[["BUNDLING IN", "HASIL PRODUKSI"]].fillna(0)
+    daily = daily.sort_values("TANGGAL", kind="stable")
+    daily["NET"] = daily["BUNDLING IN"] - daily["HASIL PRODUKSI"]
+    daily["WIP"] = daily.groupby("LINE", sort=False)["NET"].cumsum()
+    return {
+        (row.TANGGAL, row.LINE): (int(row.WIP) if float(row.WIP).is_integer() else round(float(row.WIP), 2))
+        for row in daily.itertuples(index=False)
+    }
+
+
 def filter_and_merge_data(
     df_spm_raw: pd.DataFrame,
     df_prod_raw: pd.DataFrame,
@@ -730,6 +765,9 @@ def filter_and_merge_data(
     if df_spm_raw is None or df_spm_raw.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
+    # WIP dihitung dari seluruh transaksi dalam rentang tanggal, bukan hanya
+    # baris yang lolos filter style/color/status pada tampilan.
+    wip_lookup = calculate_line_wip(df_spm_raw, df_prod_raw)
     df_spm = df_spm_raw
     if target_lines is not None:
         df_spm = df_spm[df_spm["LINE"].isin(target_lines)]
@@ -806,8 +844,12 @@ def filter_and_merge_data(
     repeated_style_key = df_merged.duplicated(join_keys, keep="first")
     df_merged.loc[repeated_style_key, "HASIL PRODUKSI"] = pd.NA
 
+    df_merged["WIP"] = [
+        wip_lookup.get((tgl, line), 0)
+        for tgl, line in zip(df_merged["TANGGAL"], df_merged["LINE"])
+    ]
     repeated_date_line = df_merged.duplicated(["TANGGAL", "LINE"], keep="first")
-    df_merged.loc[repeated_date_line, ["REQ SPM", "LEAD TIME"]] = pd.NA
+    df_merged.loc[repeated_date_line, ["REQ SPM", "LEAD TIME", "WIP"]] = pd.NA
 
     return df_merged.loc[:, OUTPUT_COLUMNS].reset_index(drop=True)
 
@@ -853,6 +895,11 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 "Lead Time diambil dari kolom Lead Time Andon pada TROUBLE_NM=Request, level TANGGAL + LINE. Satuan mengikuti sumber Andon.",
                 "Tracking SPM & Produksi",
             )
+        elif col_name == "WIP":
+            cell.comment = Comment(
+                "WIP = saldo WIP hari sebelumnya + (BUNDLING OUT x ISI BUNDLE) - HASIL PRODUKSI. Saldo awal setiap line adalah 0 pada tanggal pertama dalam rentang data. Nilai ditampilkan satu kali per tanggal + line.",
+                "Tracking SPM & Produksi",
+            )
         cell.fill = header_fill
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -876,7 +923,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
     ws.row_dimensions[2].height = 27
 
     # LINE ditampilkan sebagai bilangan bulat; kuantitas tetap dapat memiliki desimal asli.
-    numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
+    numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI", "WIP"}
     left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
     widths = {name: max(12, len(name) + 3) for name in OUTPUT_COLUMNS}
 
@@ -929,7 +976,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         if col_idx == 1:
             cell.value = "TOTAL"
             cell.alignment = Alignment(horizontal="center", vertical="center")
-        elif col_name in {"BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
+        elif col_name in {"BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI", "WIP"}:
             col_letter = get_column_letter(col_idx)
             cell.value = f"=SUM({col_letter}3:{col_letter}{last_data_row})"
             total_value = pd.to_numeric(df[col_name], errors="coerce").sum()
@@ -942,7 +989,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         default_width = {
             "TANGGAL": 15, "LINE": 9, "KT ORDER": 15, "STYLE": 19,
             "COLOR": 22, "DESCRIPTION": 32, "ISI BUNDLE": 14,
-            "STATUS": 10, "BUNDLING OUT": 17, "REQ SPM": 13, "LEAD TIME": 13, "HASIL PRODUKSI": 20,
+            "STATUS": 10, "BUNDLING OUT": 17, "REQ SPM": 13, "LEAD TIME": 13, "HASIL PRODUKSI": 20, "WIP": 13,
         }.get(col_name, 14)
         ws.column_dimensions[col_letter].width = min(max(widths[col_name], default_width), 42)
 
@@ -1140,10 +1187,10 @@ class FastTrackingApp(tk.Tk):
         col_widths = {
             "TANGGAL": 112, "LINE": 68, "KT ORDER": 126, "STYLE": 145,
             "COLOR": 170, "DESCRIPTION": 220, "ISI BUNDLE": 104,
-            "STATUS": 78, "BUNDLING OUT": 128, "REQ SPM": 105, "LEAD TIME": 110, "HASIL PRODUKSI": 145,
+            "STATUS": 78, "BUNDLING OUT": 128, "REQ SPM": 105, "LEAD TIME": 110, "HASIL PRODUKSI": 145, "WIP": 100,
         }
         left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
-        numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
+        numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI", "WIP"}
 
         # Custom two-level table header so REQ SPM can span COUNT + LEAD TIME.
         header_height = 48
@@ -1376,7 +1423,7 @@ class FastTrackingApp(tk.Tk):
             return ""
         if column == "TANGGAL" and hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d")
-        if column in {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
+        if column in {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI", "WIP"}:
             try:
                 return f"{float(value):,.0f}"
             except (TypeError, ValueError):
