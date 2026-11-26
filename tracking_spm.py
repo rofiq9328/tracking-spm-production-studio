@@ -35,6 +35,7 @@ OUTPUT_COLUMNS = [
     "STATUS",
     "BUNDLING OUT",
     "REQ SPM",
+    "LEAD TIME",
     "HASIL PRODUKSI",
 ]
 
@@ -483,8 +484,9 @@ def _parse_packing_excel(fpath: str, tgl: date | None) -> pd.DataFrame:
 
 
 def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing to supermarket") -> pd.DataFrame:
-    """Baca file Andon Monthly (.xls/.xlsx) dan ekstrak kolom Count per TANGGAL + LINE untuk section_nm terpilih."""
-    empty_df = pd.DataFrame(columns=["TANGGAL", "LINE", "REQ SPM"])
+    """Ambil Count dan Lead Time Andon untuk baris TROUBLE_NM=Request per tanggal + line."""
+    output_cols = ["TANGGAL", "LINE", "REQ SPM", "LEAD TIME"]
+    empty_df = pd.DataFrame(columns=output_cols)
     if not andon_path or not os.path.isfile(andon_path):
         return empty_df
 
@@ -494,63 +496,92 @@ def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing to su
     sheet_name = "Sheet1" if "Sheet1" in xl.sheet_names else xl.sheet_names[0]
     df_raw = xl.parse(sheet_name)
 
-    if df_raw.empty or "SECTION_NM" not in df_raw.columns or "LINE" not in df_raw.columns:
+    required_cols = {"SECTION_NM", "LINE", "TROUBLE_NM"}
+    if df_raw.empty or not required_cols.issubset(df_raw.columns):
         return empty_df
 
-    day_cols = {}
-    for col_name in df_raw.columns:
-        m = re.match(r"^DAY\s*(\d{1,2})$", str(col_name).strip(), re.IGNORECASE)
-        if m:
-            day_num = int(m.group(1))
-            sub_h = str(df_raw.iloc[0][col_name] or "").strip().lower()
-            if sub_h in {"", "count"}:
-                day_cols[day_num] = col_name
+    day_count_cols = {}
+    day_lead_cols = {}
+    source_columns = list(df_raw.columns)
+    for col_idx, col_name in enumerate(source_columns):
+        match = re.match(r"^DAY\s*(\d{1,2})$", str(col_name).strip(), re.IGNORECASE)
+        if not match:
+            continue
 
-    if not day_cols:
+        day_num = int(match.group(1))
+        count_header = str(df_raw.iloc[0][col_name] or "").strip().lower()
+        if count_header not in {"", "count"}:
+            continue
+        day_count_cols[day_num] = col_name
+
+        # Pada export Andon, kolom Lead Time berada tepat setelah kolom Count.
+        if col_idx + 1 < len(source_columns):
+            lead_col = source_columns[col_idx + 1]
+            lead_header = str(df_raw.iloc[0][lead_col] or "").strip().lower()
+            if lead_header == "lead time":
+                day_lead_cols[day_num] = lead_col
+
+    if not day_count_cols:
         return empty_df
 
     df_data = df_raw.iloc[1:].copy()
     df_data["SECTION_NM"] = df_data["SECTION_NM"].ffill()
     df_data["LINE"] = df_data["LINE"].ffill()
+    df_data["TROUBLE_NM"] = df_data["TROUBLE_NM"].ffill()
 
     target_sec_norm = norm_section_name(target_section)
-    df_sec = df_data[df_data["SECTION_NM"].apply(norm_section_name) == target_sec_norm].copy()
-    if df_sec.empty:
+    section_mask = df_data["SECTION_NM"].apply(norm_section_name).eq(target_sec_norm)
+    request_mask = df_data["TROUBLE_NM"].astype(str).str.strip().str.casefold().eq("request")
+    df_req = df_data[section_mask & request_mask].copy()
+    if df_req.empty:
         return empty_df
 
-    df_sec["LINE_NORM"] = df_sec["LINE"].apply(_normalize_line_value)
-    df_sec = df_sec[df_sec["LINE_NORM"].notna()]
+    df_req["LINE_NORM"] = df_req["LINE"].apply(_normalize_line_value)
+    df_req = df_req[df_req["LINE_NORM"].notna()]
 
     records = []
-    for _, r in df_sec.iterrows():
-        line_val = r["LINE_NORM"]
+    for _, row in df_req.iterrows():
+        line_val = row["LINE_NORM"]
         yr, mo = 2026, 11
-        if "WORK_MONTH" in r and pd.notna(r["WORK_MONTH"]):
-            wm_str = re.sub(r"\D", "", str(int(float(r["WORK_MONTH"]))))
+        if "WORK_MONTH" in row and pd.notna(row["WORK_MONTH"]):
+            wm_str = re.sub(r"\D", "", str(int(float(row["WORK_MONTH"]))))
             if len(wm_str) == 6:
                 yr, mo = int(wm_str[:4]), int(wm_str[4:6])
 
-        for day_num, col_name in day_cols.items():
-            cnt_val = parse_count_value(r.get(col_name, 0))
+        for day_num, count_col in day_count_cols.items():
             try:
                 tgl_obj = date(yr, mo, day_num)
             except ValueError:
                 continue
+
+            count_val = parse_count_value(row.get(count_col, 0))
+            lead_col = day_lead_cols.get(day_num)
+            lead_val = parse_count_value(row.get(lead_col, 0)) if lead_col else 0.0
             records.append({
                 "TANGGAL": tgl_obj,
                 "LINE": line_val,
-                "REQ_SPM_NUM": cnt_val,
+                "REQ_SPM_NUM": count_val,
+                "LEAD_TIME_NUM": lead_val,
             })
 
     if not records:
         return empty_df
 
     df_rec = pd.DataFrame(records)
-    grouped = df_rec.groupby(["TANGGAL", "LINE"], as_index=False)["REQ_SPM_NUM"].sum()
-    grouped["REQ SPM"] = grouped["REQ_SPM_NUM"].apply(
-        lambda v: int(v) if float(v).is_integer() else round(float(v), 2)
+    # Satu baris Request tersedia untuk setiap kombinasi tanggal + line pada sumber.
+    # Sum Count untuk berjaga-jaga jika file sumber memuat baris Request ganda;
+    # Lead Time dirata-ratakan, bukan dijumlahkan karena merupakan durasi.
+    grouped = df_rec.groupby(["TANGGAL", "LINE"], as_index=False).agg(
+        REQ_SPM_NUM=("REQ_SPM_NUM", "sum"),
+        LEAD_TIME_NUM=("LEAD_TIME_NUM", "mean"),
     )
-    return grouped[["TANGGAL", "LINE", "REQ SPM"]]
+    grouped["REQ SPM"] = grouped["REQ_SPM_NUM"].apply(
+        lambda value: int(value) if float(value).is_integer() else round(float(value), 2)
+    )
+    grouped["LEAD TIME"] = grouped["LEAD_TIME_NUM"].apply(
+        lambda value: int(value) if float(value).is_integer() else round(float(value), 2)
+    )
+    return grouped[output_cols]
 
 
 def _worker_spm_file(spm_folder: str, fname: str, fpath: str, tgl: date | None, use_cache: bool) -> pd.DataFrame:
@@ -758,14 +789,17 @@ def filter_and_merge_data(
         df_req = df_req_spm.copy()
         df_req["TANGGAL"] = df_req["TANGGAL"].apply(_normalize_date_value)
         df_req["LINE"] = df_req["LINE"].apply(_normalize_line_value)
-        # Data Andon kadang menyimpan Count sebagai teks; konversi sebelum merge.
-        df_req["REQ SPM"] = df_req["REQ SPM"].apply(parse_count_value)
+        # Count dan Lead Time dari Andon dapat berupa teks; konversi sebelum merge.
+        for metric_col in ("REQ SPM", "LEAD TIME"):
+            df_req[metric_col] = df_req[metric_col].apply(parse_count_value)
         if target_lines is not None:
             df_req = df_req[df_req["LINE"].isin(target_lines)]
         df_merged = df_merged.merge(df_req, how="left", on=["TANGGAL", "LINE"], sort=False)
-        df_merged["REQ SPM"] = pd.to_numeric(df_merged["REQ SPM"], errors="coerce").fillna(0)
+        for metric_col in ("REQ SPM", "LEAD TIME"):
+            df_merged[metric_col] = pd.to_numeric(df_merged[metric_col], errors="coerce").fillna(0)
     else:
         df_merged["REQ SPM"] = 0
+        df_merged["LEAD TIME"] = 0
 
     df_merged = df_merged.sort_values(
         ["TANGGAL", "LINE", "STYLE", "COLOR"], kind="stable"
@@ -774,7 +808,7 @@ def filter_and_merge_data(
     df_merged.loc[repeated_style_key, "HASIL PRODUKSI"] = pd.NA
 
     repeated_date_line = df_merged.duplicated(["TANGGAL", "LINE"], keep="first")
-    df_merged.loc[repeated_date_line, "REQ SPM"] = pd.NA
+    df_merged.loc[repeated_date_line, ["REQ SPM", "LEAD TIME"]] = pd.NA
 
     return df_merged.loc[:, OUTPUT_COLUMNS].reset_index(drop=True)
 
@@ -809,7 +843,12 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
             )
         elif col_name == "REQ SPM":
             cell.comment = Comment(
-                "REQ SPM dari Andon (section sewing to supermarket) tersedia di level TANGGAL + LINE.",
+                "REQ SPM diambil dari TROUBLE_NM=Request pada Andon, level TANGGAL + LINE.",
+                "Tracking SPM & Produksi",
+            )
+        elif col_name == "LEAD TIME":
+            cell.comment = Comment(
+                "Lead Time diambil dari kolom Lead Time Andon pada TROUBLE_NM=Request, level TANGGAL + LINE. Satuan mengikuti sumber Andon.",
                 "Tracking SPM & Produksi",
             )
         cell.fill = header_fill
@@ -819,7 +858,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
     ws.row_dimensions[1].height = 27
 
     # LINE ditampilkan sebagai bilangan bulat; kuantitas tetap dapat memiliki desimal asli.
-    numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "HASIL PRODUKSI"}
+    numeric_cols = {"LINE", "ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
     left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
     widths = {name: max(12, len(name) + 3) for name in OUTPUT_COLUMNS}
 
@@ -879,7 +918,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         default_width = {
             "TANGGAL": 15, "LINE": 9, "KT ORDER": 15, "STYLE": 19,
             "COLOR": 22, "DESCRIPTION": 32, "ISI BUNDLE": 14,
-            "STATUS": 10, "BUNDLING OUT": 17, "REQ SPM": 13, "HASIL PRODUKSI": 20,
+            "STATUS": 10, "BUNDLING OUT": 17, "REQ SPM": 13, "LEAD TIME": 13, "HASIL PRODUKSI": 20,
         }.get(col_name, 14)
         ws.column_dimensions[col_letter].width = min(max(widths[col_name], default_width), 42)
 
@@ -1084,7 +1123,7 @@ class FastTrackingApp(tk.Tk):
             "STATUS": 78, "BUNDLING OUT": 128, "REQ SPM": 105, "HASIL PRODUKSI": 145,
         }
         left_cols = {"KT ORDER", "STYLE", "COLOR", "DESCRIPTION"}
-        numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "HASIL PRODUKSI"}
+        numeric_cols = {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}
         for col in OUTPUT_COLUMNS:
             self.tree.heading(col, text=col)
             anchor = "w" if col in left_cols else ("e" if col in numeric_cols else "center")
@@ -1258,7 +1297,7 @@ class FastTrackingApp(tk.Tk):
             return ""
         if column == "TANGGAL" and hasattr(value, "strftime"):
             return value.strftime("%Y-%m-%d")
-        if column in {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "HASIL PRODUKSI"}:
+        if column in {"ISI BUNDLE", "BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
             try:
                 return f"{float(value):,.0f}"
             except (TypeError, ValueError):
