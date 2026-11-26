@@ -478,7 +478,7 @@ def _parse_packing_excel(fpath: str, tgl: date | None) -> pd.DataFrame:
     return grouped[["TANGGAL", "LINE", "STYLE_KEY", "HASIL PRODUKSI"]]
 
 
-def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing to supermarket") -> pd.DataFrame:
+def load_req_spm_from_andon(andon_path: str, target_section: str = "sewing line to supermarket") -> pd.DataFrame:
     """Baca file Andon Monthly (.xls/.xlsx) dan ekstrak kolom Count per TANGGAL + LINE untuk section_nm terpilih."""
     empty_df = pd.DataFrame(columns=["TANGGAL", "LINE", "REQ SPM"])
     if not andon_path or not os.path.isfile(andon_path):
@@ -1198,8 +1198,8 @@ class FastTrackingApp(tk.Tk):
                 prod_dir, start_dt=start_dt, end_dt=end_dt, use_cache=use_cache,
                 workers=workers, progress_cb=self._set_status,
             )
-            self._set_status("Membaca data REQ SPM (sewing to supermarket)...")
-            df_req_spm = load_req_spm_from_andon(andon_path, target_section="sewing to supermarket")
+            self._set_status("Membaca data REQ SPM (Sewing Line to SuperMarket)...")
+            df_req_spm = load_req_spm_from_andon(andon_path, target_section="sewing line to supermarket")
 
             self._set_status("Memfilter dan menggabungkan data...")
             result_df = filter_and_merge_data(
