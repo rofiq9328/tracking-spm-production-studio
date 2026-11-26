@@ -882,8 +882,13 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
                 # Paksa isi sel menjadi angka Excel, termasuk bila DataFrame berisi string angka.
                 if cell_value is not None:
                     numeric_value = parse_count_value(cell_value)
-                    cell.value = int(numeric_value) if float(numeric_value).is_integer() else float(numeric_value)
-                cell.number_format = "#,##0" if col_name == "LINE" else "#,##0.##"
+                    is_integer_value = float(numeric_value).is_integer()
+                    cell.value = int(numeric_value) if is_integer_value else float(numeric_value)
+                    # Hindari pemisah desimal menggantung pada angka bulat (contoh: 125.).
+                    # Angka pecahan tetap menampilkan bagian desimalnya.
+                    cell.number_format = "#,##0" if col_name == "LINE" or is_integer_value else "#,##0.##"
+                else:
+                    cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
             elif col_name in left_cols:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
@@ -908,7 +913,8 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
         elif col_name in {"BUNDLING OUT", "REQ SPM", "LEAD TIME", "HASIL PRODUKSI"}:
             col_letter = get_column_letter(col_idx)
             cell.value = f"=SUM({col_letter}2:{col_letter}{last_data_row})"
-            cell.number_format = "#,##0.##"
+            total_value = pd.to_numeric(df[col_name], errors="coerce").sum()
+            cell.number_format = "#,##0" if float(total_value).is_integer() else "#,##0.##"
             cell.alignment = Alignment(horizontal="right", vertical="center")
     ws.row_dimensions[total_row].height = 22
 
