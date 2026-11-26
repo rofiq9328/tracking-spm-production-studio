@@ -720,50 +720,134 @@ def load_packing_range_data(
 
 
 def calculate_line_wip(df_spm_raw: pd.DataFrame, df_prod_raw: pd.DataFrame) -> dict:
-    """Hitung saldo WIP berjalan per line dari awal rentang data (saldo awal 0)."""
+    """
+    Hitung saldo WIP per LINE + STYLE + COLOR dengan saldo awal 0.
+    Sumber produksi tidak memiliki COLOR, sehingga produksi per LINE + STYLE
+    dialokasikan ke warna menggunakan FIFO berdasarkan urutan bundling masuk.
+    """
     if df_spm_raw is None or df_spm_raw.empty:
         return {}
 
     spm = df_spm_raw.copy()
     spm["TANGGAL"] = spm["TANGGAL"].apply(_normalize_date_value)
     spm["LINE"] = spm["LINE"].apply(_normalize_line_value)
+    spm["STYLE_WIP_KEY"] = spm["STYLE_KEY"].fillna("").astype(str).str.strip().str.upper()
+    spm["COLOR_WIP_KEY"] = spm["COLOR"].fillna("").astype(str).str.strip().str.upper()
     spm["BUNDLING IN"] = (
         pd.to_numeric(spm["BUNDLING OUT"], errors="coerce").fillna(0)
         * pd.to_numeric(spm["ISI BUNDLE"], errors="coerce").fillna(0)
     )
-    daily_in = spm.groupby(["TANGGAL", "LINE"], as_index=False, dropna=False)["BUNDLING IN"].sum()
+    spm["_ROW_ORDER"] = range(len(spm))
+
+    daily_in = (
+        spm.groupby(
+            ["TANGGAL", "LINE", "STYLE_WIP_KEY", "COLOR_WIP_KEY"],
+            as_index=False, dropna=False, sort=False,
+        )
+        .agg(
+            BUNDLING_IN=("BUNDLING IN", "sum"),
+            FIRST_ROW=("_ROW_ORDER", "min"),
+        )
+    )
 
     if df_prod_raw is not None and not df_prod_raw.empty:
         prod = df_prod_raw.copy()
         prod["TANGGAL"] = prod["TANGGAL"].apply(_normalize_date_value)
         prod["LINE"] = prod["LINE"].apply(_normalize_line_value)
-        prod["HASIL PRODUKSI"] = pd.to_numeric(prod["HASIL PRODUKSI"], errors="coerce").fillna(0)
+        prod["STYLE_WIP_KEY"] = prod["STYLE_KEY"].fillna("").astype(str).str.strip().str.upper()
+        prod["HASIL PRODUKSI"] = pd.to_numeric(
+            prod["HASIL PRODUKSI"], errors="coerce"
+        ).fillna(0)
 
-        # Gunakan hanya produksi yang STYLE-nya ada pada data SPM untuk
-        # tanggal + line tersebut. Ini menyamakan basis WIP dengan kolom
-        # HASIL PRODUKSI yang ditampilkan setelah pencocokan STYLE_KEY.
-        if "STYLE_KEY" in spm.columns and "STYLE_KEY" in prod.columns:
-            valid_style_keys = spm[["TANGGAL", "LINE", "STYLE_KEY"]].drop_duplicates()
-            prod = prod.merge(
-                valid_style_keys,
-                on=["TANGGAL", "LINE", "STYLE_KEY"],
-                how="inner",
-                sort=False,
-            )
-
-        daily_out = prod.groupby(["TANGGAL", "LINE"], as_index=False, dropna=False)["HASIL PRODUKSI"].sum()
+        # Jangan mengurangi produksi dari style yang tidak tercatat pada SPM
+        # di line yang sama. Color dialokasikan terpisah dengan FIFO di bawah.
+        valid_styles = spm[["TANGGAL", "LINE", "STYLE_WIP_KEY"]].drop_duplicates()
+        prod = prod.merge(
+            valid_styles, on=["TANGGAL", "LINE", "STYLE_WIP_KEY"],
+            how="inner", sort=False,
+        )
+        daily_out = (
+            prod.groupby(
+                ["TANGGAL", "LINE", "STYLE_WIP_KEY"],
+                as_index=False, dropna=False, sort=False,
+            )["HASIL PRODUKSI"].sum()
+        )
     else:
-        daily_out = pd.DataFrame(columns=["TANGGAL", "LINE", "HASIL PRODUKSI"])
+        daily_out = pd.DataFrame(
+            columns=["TANGGAL", "LINE", "STYLE_WIP_KEY", "HASIL PRODUKSI"]
+        )
 
-    daily = daily_in.merge(daily_out, on=["TANGGAL", "LINE"], how="outer")
-    daily[["BUNDLING IN", "HASIL PRODUKSI"]] = daily[["BUNDLING IN", "HASIL PRODUKSI"]].fillna(0)
-    daily = daily.sort_values("TANGGAL", kind="stable")
-    daily["NET"] = daily["BUNDLING IN"] - daily["HASIL PRODUKSI"]
-    daily["WIP"] = daily.groupby("LINE", sort=False)["NET"].cumsum()
-    return {
-        (row.TANGGAL, row.LINE): (int(row.WIP) if float(row.WIP).is_integer() else round(float(row.WIP), 2))
-        for row in daily.itertuples(index=False)
-    }
+    # Siapkan transaksi masuk dan produksi berdasarkan LINE + STYLE.
+    input_by_group = {}
+    for row in daily_in.to_dict("records"):
+        group_key = (row["LINE"], row["STYLE_WIP_KEY"])
+        input_by_group.setdefault(group_key, {}).setdefault(row["TANGGAL"], []).append(
+            (row["FIRST_ROW"], row["COLOR_WIP_KEY"], float(row["BUNDLING_IN"] or 0))
+        )
+
+    output_by_group = {}
+    for row in daily_out.to_dict("records"):
+        group_key = (row["LINE"], row["STYLE_WIP_KEY"])
+        output_by_group.setdefault(group_key, {})[row["TANGGAL"]] = float(
+            row["HASIL PRODUKSI"] or 0
+        )
+
+    all_groups = set(input_by_group) | set(output_by_group)
+    wip_lookup = {}
+
+    for line_val, style_key in all_groups:
+        incoming_days = input_by_group.get((line_val, style_key), {})
+        production_days = output_by_group.get((line_val, style_key), {})
+        all_days = sorted(set(incoming_days) | set(production_days))
+
+        # FIFO lots berisi [warna, sisa unit]. Defisit produksi dicatat
+        # pada warna terakhir yang terpakai, lalu ditutup oleh bundling
+        # warna tersebut pada hari berikutnya.
+        fifo_lots = []
+        color_debts = {}
+        last_color = ""
+
+        for day in all_days:
+            todays_inputs = sorted(incoming_days.get(day, []), key=lambda item: item[0])
+            for _, color_key, qty in todays_inputs:
+                if qty <= 0:
+                    continue
+                last_color = color_key
+                debt = color_debts.get(color_key, 0.0)
+                if debt > 0:
+                    repaid = min(qty, debt)
+                    qty -= repaid
+                    color_debts[color_key] = debt - repaid
+                if qty > 0:
+                    fifo_lots.append([color_key, qty])
+
+            remaining_production = max(0.0, production_days.get(day, 0.0))
+            while remaining_production > 0 and fifo_lots:
+                color_key, lot_qty = fifo_lots[0]
+                consumed = min(lot_qty, remaining_production)
+                lot_qty -= consumed
+                remaining_production -= consumed
+                last_color = color_key
+                if lot_qty <= 1e-9:
+                    fifo_lots.pop(0)
+                else:
+                    fifo_lots[0][1] = lot_qty
+
+            if remaining_production > 1e-9:
+                debt_color = last_color or (todays_inputs[0][1] if todays_inputs else "")
+                color_debts[debt_color] = color_debts.get(debt_color, 0.0) + remaining_production
+
+            balances = {}
+            for color_key, lot_qty in fifo_lots:
+                balances[color_key] = balances.get(color_key, 0.0) + lot_qty
+            for color_key, debt in color_debts.items():
+                balances[color_key] = balances.get(color_key, 0.0) - debt
+
+            for color_key, balance in balances.items():
+                value = int(balance) if float(balance).is_integer() else round(float(balance), 2)
+                wip_lookup[(day, line_val, style_key, color_key)] = value
+
+    return wip_lookup
 
 
 def filter_and_merge_data(
@@ -858,11 +942,26 @@ def filter_and_merge_data(
     df_merged.loc[repeated_style_key, "HASIL PRODUKSI"] = pd.NA
 
     df_merged["WIP"] = [
-        wip_lookup.get((tgl, line), 0)
-        for tgl, line in zip(df_merged["TANGGAL"], df_merged["LINE"])
+        wip_lookup.get(
+            (
+                tgl,
+                line,
+                str(style_key or "").strip().upper(),
+                str(color or "").strip().upper(),
+            ),
+            0,
+        )
+        for tgl, line, style_key, color in zip(
+            df_merged["TANGGAL"], df_merged["LINE"],
+            df_merged["STYLE_KEY"], df_merged["COLOR"],
+        )
     ]
     repeated_date_line = df_merged.duplicated(["TANGGAL", "LINE"], keep="first")
-    df_merged.loc[repeated_date_line, ["REQ SPM", "LEAD TIME", "WIP"]] = pd.NA
+    df_merged.loc[repeated_date_line, ["REQ SPM", "LEAD TIME"]] = pd.NA
+    repeated_wip_key = df_merged.duplicated(
+        ["TANGGAL", "LINE", "STYLE_KEY", "COLOR"], keep="first"
+    )
+    df_merged.loc[repeated_wip_key, "WIP"] = pd.NA
 
     return df_merged.loc[:, OUTPUT_COLUMNS].reset_index(drop=True)
 
@@ -910,7 +1009,7 @@ def save_styled_excel(df: pd.DataFrame, out_path: str):
             )
         elif col_name == "WIP":
             cell.comment = Comment(
-                "WIP = saldo WIP hari sebelumnya + (BUNDLING OUT x ISI BUNDLE) - HASIL PRODUKSI. Saldo awal setiap line adalah 0 pada tanggal pertama dalam rentang data. Nilai ditampilkan satu kali per tanggal + line.",
+                "WIP per LINE + STYLE + COLOR. Saldo awal 0 pada tanggal pertama rentang. Karena file Hasil Produksi tidak memiliki kolom COLOR, hasil produksi per LINE + STYLE dialokasikan ke warna menggunakan FIFO (warna yang menerima bundling lebih dulu dikurangi lebih dulu).",
                 "Tracking SPM & Produksi",
             )
         cell.fill = header_fill
